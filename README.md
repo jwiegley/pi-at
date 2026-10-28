@@ -44,7 +44,7 @@ A **delay** is one or more `<number><unit>` parts:
 | hours | `h`, `hr`, `hrs`, `hour`, `hours` |
 | days | `d`, `day`, `days` |
 
-Parts may be combined and fractional: `90s`, `1h30m`, `1h 30m`, `1.5h`, `90 minutes`, `1 hour 30 minutes`, `2d`.
+Parts may be combined and fractional: `90s`, `1h30m`, `1h 30m`, `1.5h`, `90 minutes`, `1 hour 30 minutes`, `2d`. A separate part continues the delay only in a smaller unit on the same line, so `/at 2h 3d printer status` waits two hours and `/at 30m 2 days ago the build broke` waits thirty minutes.
 
 A **clock time** names the next occurrence of that time in Pi's local time zone; a time that has already passed today means tomorrow. Accepted forms are `4:35pm`, `4:35 pm`, `4:35 p.m.`, `4pm`, `11:59:30pm`, `16:35`, `04:35`, `0:30`, `noon`, and `midnight`. Across a daylight-saving change the wall-clock time is kept; a time that the change skips resolves to the next valid instant.
 
@@ -66,21 +66,30 @@ Pi's built-in commands (`/compact`, `/new`, `/model`, and the rest) and `!` shel
 - Each prompt is announced with `Sending scheduled prompt #N` and then appears in the transcript as an ordinary user message; a scheduled command shows its own output.
 - Timing follows the wall clock. The extension re-checks at least every 30 seconds, so a prompt that falls due while the machine sleeps is sent within 30 seconds of waking.
 
+A prompt that does not go out is handed back rather than lost: its text goes into the editor, ahead of any draft, and a warning says why. That happens when:
+
+- Pi rejects the prompt before starting its run, for example because no model is selected or a login expired. Pi reports its own error, and the prompt is not retried.
+- You stop a run with Escape while prompts are waiting on it. As with Pi's own queued messages, those prompts are not sent once the run ends.
+- The session was closed when the prompt fell due (see below).
+
+In RPC mode the client's editor cannot be read, so instead of replacing a draft the warning carries the full text.
+
 ## Persistence
 
 Every change to the pending prompts appends a snapshot to the session as a `pi-at/jobs` custom entry, which is never sent to the model. Prompts belong to the session rather than to a branch, so `/tree` navigation does not affect them.
 
 - **`/reload`** restores pending prompts. A prompt that fell due during the reload is sent once Pi is idle.
-- **Quit, then resume** (`pi -c`, `/resume`) restores prompts that are still in the future. A prompt that fell due while the session was closed is not sent, since sending it unannounced could surprise. Instead, a warning lists it and its text is placed in the editor, ahead of any draft, to send or discard.
-- **`/new`, `/resume` into another session, or `/fork`** pauses the current session's prompts until you return to it; they do not follow you. A fork or clone that copies the snapshot carries its prompts into the new session.
+- **Quit, then resume** (`pi -c`, `/resume`) restores prompts that are still in the future. A prompt that fell due while the session was closed is not sent, since sending it unannounced could surprise; it is handed back instead.
+- **`/new` or `/resume` into another session** leaves the current session's prompts with it; they do not follow you. Returning to the session restores them, handing back any that fell due meanwhile.
+- **`/fork` and `/clone`** start the new session with no scheduled prompts, even though it copies the parent's history: each record names the session that wrote it, so a copy can neither revive a prompt cancelled later in the parent nor send one twice.
 - **Print and JSON modes** exit before anything could fall due. There, `/at` reports an error and the extension leaves scheduled prompts untouched.
 
 ## Limitations
 
 - Prompts are sent only while Pi is running with their session open; there is no background daemon.
 - Pi writes a session file only once it holds a message, so prompts scheduled in a new, empty session survive `/reload` but not quitting Pi.
-- If Pi accepts a prompt but then fails to run it, for example because credentials expired, Pi reports the error and the prompt is not retried.
 - Scheduled prompts are text only; images cannot be attached.
+- An unexpected failure in the background, such as a full disk, stops the session's scheduled prompts with an error instead of taking Pi down; `/reload` restarts them.
 
 ## Compatibility
 
