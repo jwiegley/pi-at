@@ -7,9 +7,9 @@ import { RECORD_TYPE, parseAtRecord, type AtJob, type AtRecord } from "./src/rec
 export const STATUS_KEY = "pi-at";
 /** Longest timer wait. Each wake re-reads the wall clock, so sleep or a clock change delays a prompt by at most this. */
 export const MAX_WAIT_MS = 30_000;
-/** How long a sent prompt may take to start its run before Pi's idle state is trusted again. */
+/** How long a sent prompt may leave Pi idle before it counts as rejected; Pi starts runs far sooner. */
 export const DISPATCH_GRACE_MS = 5_000;
-/** How often a due prompt re-checks whether Pi has become idle. */
+/** How often a due or starting prompt re-checks Pi's state. */
 const BUSY_RETRY_MS = 1_000;
 
 export type AtClock = {
@@ -32,12 +32,14 @@ export type PiAtOptions = { clock?: AtClock };
 
 type Session = {
   ctx: ExtensionContext;
+  /** Written into every record, so the copies a fork or clone inherits are recognizably foreign. */
+  id: string;
   jobs: Map<number, AtJob>;
   nextId: number;
   status: string | undefined;
   cancelTimer: (() => void) | undefined;
-  /** When the last prompt was handed to Pi, until its run starts. */
-  dispatchedAt: number | undefined;
+  /** A sent prompt whose run has not started; Pi can still reject it. */
+  sending: { job: AtJob; at: number } | undefined;
 };
 
 type Completion = { value: string; label: string; description: string };
@@ -60,7 +62,7 @@ type SessionHistory = ExtensionContext["sessionManager"] & {
   getLatestCustomEntry?(customType: string, options: { scope: "all" }): SessionEntry | undefined;
 };
 
-/** The newest snapshot anywhere in the session file: prompts belong to the session, not to a branch. */
+/** The newest record anywhere in the session file: prompts belong to the session, not to a branch. */
 function latestRecordEntry(sessionManager: SessionHistory): SessionEntry | undefined {
   if (sessionManager.getLatestCustomEntry !== undefined) {
     return sessionManager.getLatestCustomEntry(RECORD_TYPE, { scope: "all" });
@@ -84,11 +86,26 @@ export function createPiAt(options: PiAtOptions = {}): (pi: ExtensionAPI) => voi
     let session: Session | undefined;
 
     const persist = (s: Session): void => {
-      const record: AtRecord = { version: 1, nextId: s.nextId, jobs: sortedJobs(s) };
+      const record: AtRecord = { version: 1, sessionId: s.id, nextId: s.nextId, jobs: sortedJobs(s) };
       pi.appendEntry(RECORD_TYPE, record);
     };
 
-    /** Show the next due prompt in the footer and wake when it is due. */
+    /** Return unsent prompts to the user: into the editor in the TUI, in full elsewhere. */
+    const handBack = (s: Session, jobs: AtJob[], reason: string, type: "warning" | "error" = "warning"): void => {
+      const now = clock.now();
+      const its = jobs.length === 1 ? "its" : "their";
+      if (s.ctx.mode === "tui") {
+        restoreToEditor(s.ctx.ui, jobs.map(({ prompt }) => prompt).join("\n\n"));
+        const rows = jobs.map((job) => `#${job.id} due ${formatWhen(job.dueAt, now)}: ${preview(job.prompt)}`);
+        s.ctx.ui.notify([`${reason}; ${its} text is in the editor:`, ...rows].join("\n"), type);
+      } else {
+        // An RPC client cannot report its editor's contents, so setting them could destroy a draft.
+        const rows = jobs.map((job) => `#${job.id} due ${formatWhen(job.dueAt, now)}:\n${job.prompt}`);
+        s.ctx.ui.notify([`${reason}; ${its} text follows:`, ...rows].join("\n"), type);
+      }
+    };
+
+    /** Show the next due prompt in the footer and wake when there is something to do. */
     const refresh = (s: Session): void => {
       s.cancelTimer?.();
       s.cancelTimer = undefined;
@@ -100,45 +117,10 @@ export function createPiAt(options: PiAtOptions = {}): (pi: ExtensionAPI) => voi
         s.status = status;
         s.ctx.ui.setStatus(STATUS_KEY, status);
       }
-      if (next === undefined) return;
-      const wait = next.dueAt - now;
-      s.cancelTimer = clock.schedule(() => {
-        s.cancelTimer = undefined;
-        pump(s);
-      }, Math.min(wait > 0 ? wait : BUSY_RETRY_MS, MAX_WAIT_MS));
-    };
-
-    const dispatch = (s: Session, job: AtJob, now: number): void => {
-      // Record the send first: a prompt is delivered at most once, even if Pi stops right after.
-      s.jobs.delete(job.id);
-      persist(s);
-      s.dispatchedAt = now;
-      // Announce first: an extension command runs inside sendUserMessage(), and Pi's TUI replaces
-      // consecutive notices, so the command's own output must come after this one.
-      s.ctx.ui.notify(`Sending scheduled prompt #${job.id}: ${preview(job.prompt)}`, "info");
-      try {
-        pi.sendUserMessage(job.prompt, { deliverAs: "followUp", expandPromptTemplates: true });
-      } catch (error) {
-        s.dispatchedAt = undefined;
-        restoreToEditor(s.ctx.ui, job.prompt);
-        s.ctx.ui.notify(
-          `Scheduled prompt #${job.id} was not sent (${describeError(error)}); its text is in the editor`,
-          "error",
-        );
-      }
-    };
-
-    /**
-     * Send the earliest due prompt once Pi is idle. One at a time: Pi stays idle until a sent
-     * prompt's run starts, so a second prompt sent meanwhile would race the first.
-     */
-    const pump = (s: Session): void => {
-      if (session !== s) return;
-      const now = clock.now();
-      const [next] = sortedJobs(s);
-      const starting = s.dispatchedAt !== undefined && now - s.dispatchedAt < DISPATCH_GRACE_MS;
-      if (next !== undefined && next.dueAt <= now && !starting && s.ctx.isIdle()) dispatch(s, next, now);
-      refresh(s);
+      if (next === undefined && s.sending === undefined) return;
+      const wait = next === undefined ? Number.POSITIVE_INFINITY : next.dueAt - now;
+      const delay = s.sending !== undefined || wait <= 0 ? BUSY_RETRY_MS : Math.min(wait, MAX_WAIT_MS);
+      s.cancelTimer = clock.schedule(() => wake(s), delay);
     };
 
     const stop = (): Session | undefined => {
@@ -146,6 +128,62 @@ export function createPiAt(options: PiAtOptions = {}): (pi: ExtensionAPI) => voi
       session = undefined;
       s?.cancelTimer?.();
       return s;
+    };
+
+    const wake = (s: Session): void => {
+      s.cancelTimer = undefined;
+      try {
+        pump(s);
+      } catch (error) {
+        // A timer callback that throws would take Pi down; stop this session's prompts instead.
+        if (session === s) stop();
+        try {
+          s.ctx.ui.setStatus(STATUS_KEY, undefined);
+          s.ctx.ui.notify(`Scheduled prompts stopped: ${describeError(error)}; /reload restarts them`, "error");
+        } catch {
+          // The session's UI is already gone.
+        }
+      }
+    };
+
+    /** Extension commands run inside sendUserMessage(); anything else proves itself by starting a run. */
+    const isExtensionCommand = (prompt: string): boolean => {
+      const name = /^\/(\S+)/.exec(prompt)?.[1];
+      return name !== undefined && pi.getCommands().some((command) => command.source === "extension" && command.name === name);
+    };
+
+    const dispatch = (s: Session, job: AtJob, now: number): void => {
+      // Record the send first: a prompt is delivered at most once, even if Pi stops right after.
+      s.jobs.delete(job.id);
+      persist(s);
+      // Announce first: an extension command runs inside sendUserMessage(), and Pi's TUI replaces
+      // consecutive notices, so the command's own output must come after this one.
+      s.ctx.ui.notify(`Sending scheduled prompt #${job.id}: ${preview(job.prompt)}`, "info");
+      if (!isExtensionCommand(job.prompt)) s.sending = { job, at: now };
+      try {
+        pi.sendUserMessage(job.prompt, { deliverAs: "followUp", expandPromptTemplates: true });
+      } catch (error) {
+        s.sending = undefined;
+        handBack(s, [job], `1 scheduled prompt was not sent (${describeError(error)})`, "error");
+      }
+    };
+
+    /**
+     * Send the earliest due prompt once Pi is idle, one at a time: Pi reports idle until a sent
+     * prompt's run starts, and it rejects a prompt (no model, expired login) only by reporting an
+     * error, so a sent prompt that leaves Pi idle past the grace period is handed back.
+     */
+    const pump = (s: Session): void => {
+      if (session !== s) return;
+      const now = clock.now();
+      if (s.sending !== undefined && now - s.sending.at >= DISPATCH_GRACE_MS && s.ctx.isIdle()) {
+        const { job } = s.sending;
+        s.sending = undefined;
+        handBack(s, [job], "1 scheduled prompt did not start");
+      }
+      const [next] = sortedJobs(s);
+      if (s.sending === undefined && next !== undefined && next.dueAt <= now && s.ctx.isIdle()) dispatch(s, next, now);
+      refresh(s);
     };
 
     const schedule = (s: Session, ui: ExtensionUIContext, args: string): void => {
@@ -242,7 +280,7 @@ export function createPiAt(options: PiAtOptions = {}): (pi: ExtensionAPI) => voi
           );
         }
         const s = session;
-        if (s === undefined) throw new Error("/at is unavailable until the session has started");
+        if (s === undefined) throw new Error("/at is not running in this session; /reload restarts it");
         const trimmed = args.trim();
         const [word = "", ...rest] = trimmed.split(/\s+/);
         try {
@@ -261,14 +299,23 @@ export function createPiAt(options: PiAtOptions = {}): (pi: ExtensionAPI) => voi
       // These modes run one prompt and exit, so leave the session's prompts for an interactive run.
       if (ctx.mode === "print" || ctx.mode === "json") return;
 
-      const s: Session = { ctx, jobs: new Map(), nextId: 1, status: undefined, cancelTimer: undefined, dispatchedAt: undefined };
+      const s: Session = {
+        ctx,
+        id: ctx.sessionManager.getSessionId(),
+        jobs: new Map(),
+        nextId: 1,
+        status: undefined,
+        cancelTimer: undefined,
+        sending: undefined,
+      };
       session = s;
       const entry = latestRecordEntry(ctx.sessionManager);
       if (entry !== undefined) {
         const record = entry.type === "custom" ? parseAtRecord(entry.data) : undefined;
         if (record === undefined) {
           ctx.ui.notify("Ignored an unreadable pi-at record; no scheduled prompts were restored", "warning");
-        } else {
+        } else if (record.sessionId === s.id) {
+          // Otherwise this is a fork or clone holding its parent's records; those prompts stay there.
           s.nextId = record.nextId;
           for (const job of record.jobs) s.jobs.set(job.id, job);
         }
@@ -281,12 +328,7 @@ export function createPiAt(options: PiAtOptions = {}): (pi: ExtensionAPI) => voi
       if (missed.length > 0) {
         for (const job of missed) s.jobs.delete(job.id);
         persist(s);
-        restoreToEditor(ctx.ui, missed.map(({ prompt }) => prompt).join("\n\n"));
-        const header =
-          `Missed ${plural(missed.length, "scheduled prompt")} while this session was closed; ` +
-          `${missed.length === 1 ? "its" : "their"} text is in the editor:`;
-        const rows = missed.map((job) => `#${job.id} due ${formatWhen(job.dueAt, now)}: ${preview(job.prompt)}`);
-        ctx.ui.notify([header, ...rows].join("\n"), "warning");
+        handBack(s, missed, `Missed ${plural(missed.length, "scheduled prompt")} while this session was closed`);
       }
 
       const [next] = sortedJobs(s);
@@ -296,21 +338,30 @@ export function createPiAt(options: PiAtOptions = {}): (pi: ExtensionAPI) => voi
       pump(s);
     });
 
-    pi.on("session_shutdown", (event, ctx) => {
-      const s = stop();
-      if (s === undefined) return;
-      if (s.jobs.size > 0 && (event.reason === "new" || event.reason === "resume" || event.reason === "fork")) {
-        ctx.ui.notify(`Paused ${plural(s.jobs.size, "scheduled prompt")} until this session is resumed`, "info");
-      }
-      ctx.ui.setStatus(STATUS_KEY, undefined);
+    pi.on("session_shutdown", (_event, ctx) => {
+      if (stop() !== undefined) ctx.ui.setStatus(STATUS_KEY, undefined);
     });
 
     pi.on("agent_start", () => {
-      if (session !== undefined) session.dispatchedAt = undefined;
+      if (session === undefined || session.sending === undefined) return;
+      session.sending = undefined;
+      refresh(session);
     });
 
-    pi.on("agent_settled", () => {
-      if (session !== undefined) pump(session);
+    pi.on("agent_settled", (event) => {
+      const s = session;
+      if (s === undefined) return;
+      if (event.aborted) {
+        // As Pi does with its own queue, prompts that waited on a run the user stopped go back to them.
+        const now = clock.now();
+        const due = sortedJobs(s).filter((job) => job.dueAt <= now);
+        if (due.length > 0) {
+          for (const job of due) s.jobs.delete(job.id);
+          persist(s);
+          handBack(s, due, `Held ${plural(due.length, "due scheduled prompt")} because the run was stopped`);
+        }
+      }
+      pump(s);
     });
   };
 }

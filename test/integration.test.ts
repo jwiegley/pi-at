@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import { fauxAssistantMessage, type Message } from "@earendil-works/pi-ai";
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import { createPiAt, STATUS_KEY } from "../index.ts";
+import { createPiAt, DISPATCH_GRACE_MS, STATUS_KEY } from "../index.ts";
 import { RECORD_TYPE } from "../src/record.ts";
 import { FakeClock } from "./support/clock.ts";
 import { createTestHost, type TestHost } from "./support/host.ts";
@@ -78,8 +78,13 @@ async function startHost(prompts?: Record<string, string>) {
     ...(prompts === undefined ? {} : { prompts }),
   });
   const ui = recordingUi();
-  await host.session.bindExtensions({ mode: "tui", uiContext: ui.context });
-  return { clock, host, ui };
+  const errors: string[] = [];
+  await host.session.bindExtensions({
+    mode: "tui",
+    uiContext: ui.context,
+    onError: ({ event, error }) => errors.push(`${event}: ${error}`),
+  });
+  return { clock, host, ui, errors };
 }
 
 test("loads the packaged extension without errors", async () => {
@@ -165,6 +170,56 @@ test("scheduled templates and extension commands run as if typed", async () => {
     await waitFor(() => asked.length === 2, "the nested prompt");
     await host.session.waitForIdle();
     assert.deepEqual(asked, ["Review the parser for regressions.", "nested follow-up"]);
+  } finally {
+    host.cleanup();
+  }
+});
+
+test("a fork cannot revive a prompt its parent cancelled after the fork point", async () => {
+  const { clock, host } = await startHost();
+  const asked = recordPrompts(host, 3);
+  try {
+    await host.session.prompt("first message");
+    await host.session.prompt("/at 1h deploy the release branch to production");
+    const scheduled = host.sessionManager.getLeafId()!;
+    await host.session.prompt("second message");
+    await host.session.prompt("/at cancel 1");
+
+    // Forking from "second message" copies everything before it, including the scheduling record.
+    const fork = await host.replaceSession("fork", () => host.sessionManager.createBranchedSession(scheduled));
+    const forkUi = recordingUi();
+    await fork.bindExtensions({ mode: "tui", uiContext: forkUi.context });
+    assert.deepEqual(forkUi.messages, []);
+    assert.equal(forkUi.status, undefined);
+
+    clock.advance(2 * HOUR);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await fork.waitForIdle();
+    assert.deepEqual(asked, ["first message", "second message"]);
+  } finally {
+    host.cleanup();
+  }
+});
+
+test("a prompt Pi rejects before its run starts goes back to the editor", async () => {
+  const { clock, host, ui, errors } = await startHost();
+  try {
+    await host.session.prompt("/at 1h re-run the integration suite and file issues for new failures");
+    ui.editorText = "draft";
+    // By the time it is due, no model is available, so Pi refuses the prompt and reports why.
+    (host.session.agent.state as { model: unknown }).model = undefined;
+    clock.advance(HOUR);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.match(errors.join("\n"), /No model selected/);
+
+    clock.advance(DISPATCH_GRACE_MS);
+    assert.equal(ui.editorText, "re-run the integration suite and file issues for new failures\n\ndraft");
+    assert.equal(
+      ui.messages.at(-1),
+      "1 scheduled prompt did not start; its text is in the editor:\n" +
+        "#1 due 2:00pm: re-run the integration suite and file issues for new failur…",
+    );
+    assert.equal(host.faux.state.callCount, 0);
   } finally {
     host.cleanup();
   }

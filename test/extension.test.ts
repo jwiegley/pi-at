@@ -22,12 +22,19 @@ type Command = {
 };
 type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
 
+type CommandInfo = { name: string; source: "extension" | "prompt" | "skill" };
+
 /** One extension runtime; a reload or session switch replaces it while the session file persists. */
-function createRuntime(clock: FakeClock, entries: Entry[], commandNames = ["at"]) {
+function createRuntime(
+  clock: FakeClock,
+  entries: Entry[],
+  commands: CommandInfo[] = [{ name: "at", source: "extension" }],
+) {
   const handlers = new Map<string, Handler[]>();
   const sends: Array<{ content: unknown; options: unknown }> = [];
   let command: Command | undefined;
   let sendError: Error | undefined;
+  let appendError: Error | undefined;
   const api = {
     on(event: string, handler: Handler) {
       handlers.set(event, [...(handlers.get(event) ?? []), handler]);
@@ -45,10 +52,15 @@ function createRuntime(clock: FakeClock, entries: Entry[], commandNames = ["at"]
       sends.push({ content, options });
     },
     appendEntry(customType: string, data: unknown) {
+      if (appendError !== undefined) {
+        const error = appendError;
+        appendError = undefined;
+        throw error;
+      }
       entries.push({ type: "custom", id: `entry-${entries.length + 1}`, customType, data: structuredClone(data) });
     },
     getCommands() {
-      return commandNames.map((name) => ({ name, source: "extension" }));
+      return commands;
     },
   } as unknown as ExtensionAPI;
   createPiAt({ clock })(api);
@@ -62,6 +74,9 @@ function createRuntime(clock: FakeClock, entries: Entry[], commandNames = ["at"]
     failNextSend(error: Error) {
       sendError = error;
     },
+    failNextAppend(error: Error) {
+      appendError = error;
+    },
     async emit(event: string, payload: object, ui: Ui) {
       for (const handler of handlers.get(event) ?? []) await handler({ type: event, ...payload }, ui.ctx);
     },
@@ -71,10 +86,12 @@ function createRuntime(clock: FakeClock, entries: Entry[], commandNames = ["at"]
 type Runtime = ReturnType<typeof createRuntime>;
 
 /** The jwiegley/pi fork indexes custom entries; upstream Pi only offers the full history. */
-function sessionManager(entries: Entry[], history: "indexed" | "upstream") {
+function sessionManager(entries: Entry[], history: "indexed" | "upstream", sessionId: string) {
   const getEntries = () => [...entries];
-  if (history === "upstream") return { getEntries };
+  const getSessionId = () => sessionId;
+  if (history === "upstream") return { getEntries, getSessionId };
   return {
+    getSessionId,
     getEntries() {
       throw new Error("pi-at must use the indexed lookup when the host provides one");
     },
@@ -88,7 +105,12 @@ function sessionManager(entries: Entry[], history: "indexed" | "upstream") {
 
 function createUi(
   entries: Entry[],
-  options: { mode?: ExtensionContext["mode"]; editorText?: string; history?: "indexed" | "upstream" } = {},
+  options: {
+    mode?: ExtensionContext["mode"];
+    editorText?: string;
+    history?: "indexed" | "upstream";
+    sessionId?: string;
+  } = {},
 ) {
   const mode = options.mode ?? "tui";
   const ui = {
@@ -120,9 +142,14 @@ function createUi(
       },
     },
     isIdle: () => ui.idle,
-    sessionManager: sessionManager(entries, options.history ?? "indexed"),
+    sessionManager: sessionManager(entries, options.history ?? "indexed", options.sessionId ?? "session-1"),
   } as unknown as ExtensionCommandContext;
   return ui;
+}
+
+/** What Pi does once a sent prompt passes its checks. */
+async function runStarts(runtime: Runtime, ui: Ui): Promise<void> {
+  await runtime.emit("agent_start", {}, ui);
 }
 
 type Ui = ReturnType<typeof createUi>;
@@ -166,8 +193,11 @@ test("sends a delayed prompt once it is due", async () => {
   assert.equal(ui.messages.at(-1), "Sending scheduled prompt #1: check the build");
   assert.equal(ui.status, undefined);
 
+  await runStarts(runtime, ui);
   clock.advance(24 * HOUR);
   assert.equal(runtime.sends.length, 1);
+  assert.equal(ui.messages.at(-1), "Sending scheduled prompt #1: check the build");
+  assert.equal(ui.editorText, "");
 });
 
 test("sends a clock-time prompt at the next occurrence of that time", async () => {
@@ -183,6 +213,7 @@ test("sends a clock-time prompt at the next occurrence of that time", async () =
   clock.advance(3 * HOUR + 35 * MINUTE);
   assert.deepEqual(runtime.sends.map(({ content }) => content), ["continue"]);
   assert.equal(ui.status, "◷ at tomorrow 9:00am");
+  await runStarts(runtime, ui);
   clock.advance(20 * HOUR - 3 * HOUR - 35 * MINUTE);
   assert.deepEqual(runtime.sends.map(({ content }) => content), ["continue", "morning review"]);
 });
@@ -244,14 +275,46 @@ test("sends simultaneous prompts one run at a time", async () => {
   assert.deepEqual(runtime.sends.map(({ content }) => content), ["first", "second"]);
 });
 
-test("moves on after the grace period when a sent prompt starts no run", async () => {
+test("moves straight on after an extension command, which runs as it is sent", async () => {
   const { clock, runtime, ui } = await start();
   await runtime.run("1h /at 2h nested", ui);
   await runtime.run("1h second", ui);
   clock.advance(HOUR);
   assert.equal(runtime.sends.length, 1);
-  clock.advance(DISPATCH_GRACE_MS + SECOND);
+  clock.advance(SECOND);
   assert.deepEqual(runtime.sends.map(({ content }) => content), ["/at 2h nested", "second"]);
+  assert.equal(ui.editorText, "");
+});
+
+test("hands a prompt back when Pi never starts its run", async () => {
+  const clock = new FakeClock(START);
+  const entries: Entry[] = [];
+  const runtime = createRuntime(clock, entries, [
+    { name: "at", source: "extension" },
+    { name: "review", source: "prompt" },
+  ]);
+  const ui = createUi(entries, { editorText: "draft" });
+  await runtime.emit("session_start", { reason: "startup" }, ui);
+  await runtime.run("1h /review the parser", ui);
+  await runtime.run("1h second", ui);
+
+  // Pi takes the prompt, then rejects it before any run starts (no model, expired login).
+  clock.advance(HOUR);
+  assert.deepEqual(runtime.sends.map(({ content }) => content), ["/review the parser"]);
+  clock.advance(DISPATCH_GRACE_MS - 1);
+  assert.equal(ui.editorText, "draft");
+  assert.equal(runtime.sends.length, 1);
+
+  clock.advance(1);
+  assert.equal(ui.editorText, "/review the parser\n\ndraft");
+  assert.deepEqual(ui.notifications.slice(-2), [
+    {
+      message: "1 scheduled prompt did not start; its text is in the editor:\n#1 due 2:00pm: /review the parser",
+      type: "warning",
+    },
+    { message: "Sending scheduled prompt #2: second", type: "info" },
+  ]);
+  assert.deepEqual(runtime.sends.map(({ content }) => content), ["/review the parser", "second"]);
 });
 
 test("re-reads the wall clock so a sleeping machine sends soon after waking", async () => {
@@ -397,15 +460,102 @@ test("restores from the full history on upstream Pi, which lacks indexed lookups
   assert.deepEqual(reloaded.sends.map(({ content }) => content), ["second"]);
 });
 
-test("pauses prompts when switching to another session", async () => {
-  const { clock, runtime, ui } = await start();
+test("leaves prompts in their session when switching to another", async () => {
+  const { clock, entries, runtime, ui } = await start();
   await runtime.run("1h first", ui);
   await runtime.run("2h second", ui);
   await runtime.emit("session_shutdown", { reason: "new" }, ui);
-  assert.equal(ui.messages.at(-1), "Paused 2 scheduled prompts until this session is resumed");
   assert.equal(ui.status, undefined);
-  clock.advance(3 * HOUR);
+  clock.advance(90 * MINUTE);
   assert.deepEqual(runtime.sends, []);
+
+  // Returning later: what fell due meanwhile is handed back, the rest resumes.
+  const back = createRuntime(clock, entries);
+  const backUi = createUi(entries);
+  await back.emit("session_start", { reason: "resume" }, backUi);
+  assert.deepEqual(backUi.messages, [
+    "Missed 1 scheduled prompt while this session was closed; its text is in the editor:\n#1 due 2:00pm: first",
+    "Restored 1 scheduled prompt; next at 3:00pm",
+  ]);
+});
+
+test("never restores prompts that a fork or clone copied from another session", async () => {
+  const { clock, entries, runtime, ui } = await start();
+  await runtime.run("1h deploy the release branch", ui);
+  await runtime.emit("session_shutdown", { reason: "fork" }, ui);
+
+  // A fork's file begins with a copy of the parent's entries, records included.
+  const forkEntries = structuredClone(entries);
+  const fork = createRuntime(clock, forkEntries);
+  const forkUi = createUi(forkEntries, { sessionId: "session-2" });
+  await fork.emit("session_start", { reason: "fork" }, forkUi);
+  assert.deepEqual(forkUi.notifications, []);
+  assert.equal(forkUi.status, undefined);
+  clock.advance(2 * HOUR);
+  assert.deepEqual(fork.sends, []);
+
+  await fork.run("1h its own prompt", forkUi);
+  assert.equal(forkUi.messages.at(-1), "Scheduled #1 for 4:00pm (in 1h): its own prompt");
+  assert.equal((forkEntries.at(-1)?.data as { sessionId: string }).sessionId, "session-2");
+});
+
+test("hands due prompts back instead of sending them when the user stops a run", async () => {
+  const { clock, runtime, ui } = await start({ editorText: "draft" });
+  await runtime.run("1h check the deploy", ui);
+  await runtime.run("3h later work", ui);
+  ui.idle = false;
+  clock.advance(HOUR + 10 * MINUTE);
+
+  ui.idle = true;
+  await runtime.emit("agent_settled", { aborted: true }, ui);
+  assert.deepEqual(runtime.sends, []);
+  assert.equal(ui.editorText, "check the deploy\n\ndraft");
+  assert.deepEqual(ui.notifications.at(-1), {
+    message:
+      "Held 1 due scheduled prompt because the run was stopped; its text is in the editor:\n" +
+      "#1 due 2:00pm: check the deploy",
+    type: "warning",
+  });
+  clock.advance(MINUTE);
+  assert.deepEqual(runtime.sends, []);
+  assert.equal(ui.status, "◷ at 4:00pm");
+  clock.advance(2 * HOUR);
+  assert.deepEqual(runtime.sends.map(({ content }) => content), ["later work"]);
+});
+
+test("stops scheduling instead of crashing Pi when a timer task fails", async () => {
+  const { clock, runtime, ui } = await start();
+  await runtime.run("1h continue", ui);
+  await runtime.run("2h later", ui);
+  runtime.failNextAppend(new Error("ENOSPC: no space left on device"));
+  assert.doesNotThrow(() => clock.advance(HOUR));
+  assert.deepEqual(ui.notifications.at(-1), {
+    message: "Scheduled prompts stopped: ENOSPC: no space left on device; /reload restarts them",
+    type: "error",
+  });
+  const notices = ui.notifications.length;
+  clock.advance(2 * HOUR);
+  assert.deepEqual(runtime.sends, []);
+  assert.equal(ui.notifications.length, notices);
+  await assert.rejects(runtime.run("1h again", ui), /^Error: \/at is not running in this session; \/reload restarts it/);
+});
+
+test("reports the full text instead of replacing the draft over RPC, which cannot read the editor", async () => {
+  const { clock, entries, runtime, ui } = await start({ mode: "rpc" });
+  await runtime.run("1h first\nline two", ui);
+  await runtime.emit("session_shutdown", { reason: "quit" }, ui);
+  clock.sleep(2 * HOUR);
+
+  const resumed = createRuntime(clock, entries);
+  const resumedUi = createUi(entries, { mode: "rpc", editorText: "client draft" });
+  await resumed.emit("session_start", { reason: "startup" }, resumedUi);
+  assert.equal(resumedUi.editorText, "client draft");
+  assert.deepEqual(resumedUi.notifications, [
+    {
+      message: "Missed 1 scheduled prompt while this session was closed; its text follows:\n#1 due 2:00pm:\nfirst\nline two",
+      type: "warning",
+    },
+  ]);
 });
 
 test("ignores an unreadable record and starts fresh", async () => {
@@ -452,7 +602,7 @@ test("restores a prompt to the editor if Pi refuses to take it", async () => {
   assert.deepEqual(runtime.sends, []);
   assert.equal(ui.editorText, "continue\n\ndraft");
   assert.deepEqual(ui.notifications.at(-1), {
-    message: "Scheduled prompt #1 was not sent (dispatch unavailable); its text is in the editor",
+    message: "1 scheduled prompt was not sent (dispatch unavailable); its text is in the editor:\n#1 due 2:00pm: continue",
     type: "error",
   });
   clock.advance(HOUR);

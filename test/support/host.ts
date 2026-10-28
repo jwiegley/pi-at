@@ -11,6 +11,8 @@ import {
   type InlineExtension,
   type LoadExtensionsResult,
   ModelRuntime,
+  type SessionShutdownEvent,
+  type SessionStartEvent,
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
@@ -21,6 +23,11 @@ export type TestHost = {
   session: AgentSession;
   sessionManager: SessionManager;
   extensionsResult: LoadExtensionsResult;
+  /**
+   * Replace the session as Pi does for /fork, /clone, /new, or /resume: shut the old runtime
+   * down, let `switchTo` point the session manager elsewhere, and start fresh extension runtimes.
+   */
+  replaceSession(reason: SessionShutdownEvent["reason"] & SessionStartEvent["reason"], switchTo: () => void): Promise<AgentSession>;
   cleanup(): void;
 };
 
@@ -37,20 +44,6 @@ export async function createTestHost(
     writeFileSync(join(directory, name), content);
   }
   const settingsManager = SettingsManager.inMemory();
-  const resourceLoader = new DefaultResourceLoader({
-    cwd: root,
-    agentDir,
-    settingsManager,
-    additionalExtensionPaths:
-      options.extensionPaths ?? [fileURLToPath(new URL("../../index.ts", import.meta.url))],
-    extensionFactories,
-    noSkills: true,
-    noPromptTemplates: options.prompts === undefined,
-    noThemes: true,
-    noContextFiles: true,
-  });
-  await resourceLoader.reload();
-
   const faux = fauxProvider();
   const modelRuntime = await ModelRuntime.create({
     authPath: join(agentDir, "auth.json"),
@@ -59,29 +52,54 @@ export async function createTestHost(
     refreshOnCreate: false,
   });
   modelRuntime.registerNativeProvider(faux.provider);
-
   const sessionManager = SessionManager.inMemory(root);
-  const { session, extensionsResult } = await createAgentSession({
-    cwd: root,
-    agentDir,
-    model: faux.getModel(),
-    modelRuntime,
-    resourceLoader,
-    sessionManager,
-    settingsManager,
-    customTools: [],
-  });
 
-  return {
+  const startSession = async (sessionStartEvent?: SessionStartEvent) => {
+    const resourceLoader = new DefaultResourceLoader({
+      cwd: root,
+      agentDir,
+      settingsManager,
+      additionalExtensionPaths:
+        options.extensionPaths ?? [fileURLToPath(new URL("../../index.ts", import.meta.url))],
+      extensionFactories,
+      noSkills: true,
+      noPromptTemplates: options.prompts === undefined,
+      noThemes: true,
+      noContextFiles: true,
+    });
+    await resourceLoader.reload();
+    return createAgentSession({
+      cwd: root,
+      agentDir,
+      model: faux.getModel(),
+      modelRuntime,
+      resourceLoader,
+      sessionManager,
+      settingsManager,
+      customTools: [],
+      ...(sessionStartEvent === undefined ? {} : { sessionStartEvent }),
+    });
+  };
+
+  const { session, extensionsResult } = await startSession();
+  const host: TestHost = {
     root,
     faux,
     session,
     sessionManager,
     extensionsResult,
+    async replaceSession(reason, switchTo) {
+      await host.session.extensionRunner.emit({ type: "session_shutdown", reason });
+      host.session.dispose();
+      switchTo();
+      host.session = (await startSession({ type: "session_start", reason })).session;
+      return host.session;
+    },
     cleanup() {
-      session.dispose();
+      host.session.dispose();
       modelRuntime.unregisterProvider(faux.provider.id);
       rmSync(root, { recursive: true, force: true });
     },
   };
+  return host;
 }

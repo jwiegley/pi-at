@@ -1,0 +1,314 @@
+#+TITLE: Obr Issues
+#+SEQ_TODO: TODO DOING DRAFT WAIT DEFER NOTE | DONE CANCELED
+#+ISSUE_PREFIX: at-at-epic
+
+* DONE [#B] pi-at: /at command that sends a prompt after a delay or at a clock time
+:PROPERTIES:
+:OBR_SCHEMA_VERSION: 17
+:ID:       at-at-epic-fbv
+:LABELS:   []
+:ISSUE_TYPE: epic
+:CREATED:  [2026-10-28 Wed 11:31]
+:MODIFIED: [2026-10-28 Wed 13:06]
+:CREATED_BY: johnw
+:FINISHED: [2026-10-28 Wed 13:06]
+:CLOSE_REASON: /at implemented, tested (52 tests incl. real Pi sessions and packed tarball), reviewed, and verified live on the user's Pi fork.
+:SOURCE_REPO: pi-at
+:SOURCE_REPO_PATH: /Users/johnw/src/sys/pi-at
+:ORIGINAL_SIZE: 0
+:END:
+
+Pi extension providing /at <when> <prompt>, where <when> is a duration (4h, 1h30m, 90 minutes) or a clock time (4:35pm, 16:35, noon). Prompts are submitted as if typed once due and Pi is idle; jobs can be listed and cancelled, show in the footer, and persist in the session so they survive /reload and resume.
+
+* DONE [#B] Scaffold pi-at package with pinned Pi 1.3.0 development dependencies
+:PROPERTIES:
+:OBR_SCHEMA_VERSION: 17
+:ID:       at-at-epic-fbv.1
+:LABELS:   []
+:ISSUE_TYPE: chore
+:CREATED:  [2026-10-28 Wed 11:31]
+:MODIFIED: [2026-10-28 Wed 11:39]
+:CREATED_BY: johnw
+:FINISHED: [2026-10-28 Wed 11:39]
+:CLOSE_REASON: Package, tsconfig, .gitignore, and pinned Pi 1.3.0 dev dependencies in place; tsc and node --test run
+:SOURCE_REPO: pi-at
+:SOURCE_REPO_PATH: /Users/johnw/src/sys/pi-at
+:ORIGINAL_SIZE: 0
+:END:
+
+package.json (pi manifest, private, peer range >=1.3.0 <2.0.0, exact dev pins), tsconfig matching sibling pi extensions, .gitignore, node --test runner.
+
+** Dependencies
+
+#+begin_src json
+[
+  {
+    "issue_id": "at-at-epic-fbv.1",
+    "depends_on_id": "at-at-epic-fbv",
+    "type": "parent-child",
+    "created_at": "2026-10-28T18:31:33.603057Z",
+    "created_by": "johnw",
+    "metadata": "{}",
+    "thread_id": ""
+  }
+]
+#+end_src
+
+* DONE [#B] Parse /at time specs and format due times
+:PROPERTIES:
+:OBR_SCHEMA_VERSION: 17
+:ID:       at-at-epic-fbv.2
+:LABELS:   []
+:ISSUE_TYPE: task
+:CREATED:  [2026-10-28 Wed 11:31]
+:MODIFIED: [2026-10-28 Wed 11:40]
+:CREATED_BY: johnw
+:FINISHED: [2026-10-28 Wed 11:40]
+:CLOSE_REASON: parseAtRequest/resolveDueAt/assertDeliverable and format helpers implemented test-first (14 tests)
+:SOURCE_REPO: pi-at
+:SOURCE_REPO_PATH: /Users/johnw/src/sys/pi-at
+:ORIGINAL_SIZE: 0
+:END:
+
+Durations (4h, 1h30m, 1.5h, 90 minutes, 1h 30m) and clock times (4:35pm, 4:35 pm, 4pm, 16:35, 04:35, noon, midnight) resolving to the next local occurrence; reject ambiguous 1:00-11:59 without am/pm and bare numbers. Deterministic 12-hour display with today/tomorrow/date qualifiers.
+
+** Dependencies
+
+#+begin_src json
+[
+  {
+    "issue_id": "at-at-epic-fbv.2",
+    "depends_on_id": "at-at-epic-fbv",
+    "type": "parent-child",
+    "created_at": "2026-10-28T18:31:35.330009Z",
+    "created_by": "johnw",
+    "metadata": "{}",
+    "thread_id": ""
+  },
+  {
+    "issue_id": "at-at-epic-fbv.2",
+    "depends_on_id": "at-at-epic-fbv.1",
+    "type": "blocks",
+    "created_at": "2026-10-28T18:31:42.069187Z",
+    "created_by": "johnw",
+    "metadata": "{}",
+    "thread_id": ""
+  }
+]
+#+end_src
+
+* DONE [#B] Schedule, persist, and deliver /at prompts
+:PROPERTIES:
+:OBR_SCHEMA_VERSION: 17
+:ID:       at-at-epic-fbv.3
+:LABELS:   []
+:ISSUE_TYPE: feature
+:CREATED:  [2026-10-28 Wed 11:31]
+:MODIFIED: [2026-10-28 Wed 13:05]
+:CREATED_BY: johnw
+:FINISHED: [2026-10-28 Wed 11:49]
+:CLOSE_REASON: index.ts: schedule/list/cancel/completions, wall-clock timer, one-at-a-time idle dispatch, footer status, session snapshots with reload/missed policy, fork+upstream history lookup; 18 behavior tests, 13/13 mutations caught
+:SOURCE_REPO: pi-at
+:SOURCE_REPO_PATH: /Users/johnw/src/sys/pi-at
+:ORIGINAL_SIZE: 0
+:END:
+
+Command handling (schedule, list, cancel by id/several ids/all, argument completions), wall-clock timer re-checked at least every 30s, one dispatch at a time only while idle, footer status, session-tagged snapshot records restored on session_start (reload keeps due jobs; other starts hand back overdue jobs; forks and clones inherit none), refusal of built-in commands and ! shell input, inert in print/json modes.
+
+** Dependencies
+
+#+begin_src json
+[
+  {
+    "issue_id": "at-at-epic-fbv.3",
+    "depends_on_id": "at-at-epic-fbv",
+    "type": "parent-child",
+    "created_at": "2026-10-28T18:31:36.718445Z",
+    "created_by": "johnw",
+    "metadata": "{}",
+    "thread_id": ""
+  },
+  {
+    "issue_id": "at-at-epic-fbv.3",
+    "depends_on_id": "at-at-epic-fbv.2",
+    "type": "blocks",
+    "created_at": "2026-10-28T18:31:43.859762Z",
+    "created_by": "johnw",
+    "metadata": "{}",
+    "thread_id": ""
+  }
+]
+#+end_src
+
+* DONE [#C] Test /at against a real Pi 1.3.0 session and packed tarball
+:PROPERTIES:
+:OBR_SCHEMA_VERSION: 17
+:ID:       at-at-epic-fbv.4
+:LABELS:   []
+:ISSUE_TYPE: task
+:CREATED:  [2026-10-28 Wed 11:31]
+:MODIFIED: [2026-10-28 Wed 12:08]
+:CREATED_BY: johnw
+:FINISHED: [2026-10-28 Wed 12:08]
+:CLOSE_REASON: Integration tests on a real npm Pi 1.3.0 session (faux provider): delivery, /reload restore via upstream history scan, template expansion and nested /at dispatch, built-in refusal; package test packs and loads the tarball
+:SOURCE_REPO: pi-at
+:SOURCE_REPO_PATH: /Users/johnw/src/sys/pi-at
+:ORIGINAL_SIZE: 0
+:END:
+
+createAgentSession + faux provider: scheduled prompt reaches the model, reload restores jobs, package packs only release files and loads through Pi's resource loader.
+
+** Dependencies
+
+#+begin_src json
+[
+  {
+    "issue_id": "at-at-epic-fbv.4",
+    "depends_on_id": "at-at-epic-fbv",
+    "type": "parent-child",
+    "created_at": "2026-10-28T18:31:37.717202Z",
+    "created_by": "johnw",
+    "metadata": "{}",
+    "thread_id": ""
+  },
+  {
+    "issue_id": "at-at-epic-fbv.4",
+    "depends_on_id": "at-at-epic-fbv.3",
+    "type": "blocks",
+    "created_at": "2026-10-28T18:31:45.739576Z",
+    "created_by": "johnw",
+    "metadata": "{}",
+    "thread_id": ""
+  }
+]
+#+end_src
+
+* DONE [#C] Document /at usage, semantics, and installation
+:PROPERTIES:
+:OBR_SCHEMA_VERSION: 17
+:ID:       at-at-epic-fbv.5
+:LABELS:   []
+:ISSUE_TYPE: docs
+:CREATED:  [2026-10-28 Wed 11:31]
+:MODIFIED: [2026-10-28 Wed 12:09]
+:CREATED_BY: johnw
+:FINISHED: [2026-10-28 Wed 12:09]
+:CLOSE_REASON: README documents syntax, delivery, persistence and missed-prompt policy, limitations (incl. lazy session files), compatibility, development, removal
+:SOURCE_REPO: pi-at
+:SOURCE_REPO_PATH: /Users/johnw/src/sys/pi-at
+:ORIGINAL_SIZE: 0
+:END:
+
+README covering syntax, delivery semantics, persistence/missed policy, limitations, development commands.
+
+** Dependencies
+
+#+begin_src json
+[
+  {
+    "issue_id": "at-at-epic-fbv.5",
+    "depends_on_id": "at-at-epic-fbv",
+    "type": "parent-child",
+    "created_at": "2026-10-28T18:31:38.982195Z",
+    "created_by": "johnw",
+    "metadata": "{}",
+    "thread_id": ""
+  },
+  {
+    "issue_id": "at-at-epic-fbv.5",
+    "depends_on_id": "at-at-epic-fbv.3",
+    "type": "blocks",
+    "created_at": "2026-10-28T18:31:48.044471Z",
+    "created_by": "johnw",
+    "metadata": "{}",
+    "thread_id": ""
+  }
+]
+#+end_src
+
+* DONE [#C] Verify /at in a live Pi TUI session
+:PROPERTIES:
+:OBR_SCHEMA_VERSION: 17
+:ID:       at-at-epic-fbv.6
+:LABELS:   []
+:ISSUE_TYPE: task
+:CREATED:  [2026-10-28 Wed 11:31]
+:MODIFIED: [2026-10-28 Wed 13:06]
+:CREATED_BY: johnw
+:FINISHED: [2026-10-28 Wed 13:06]
+:CLOSE_REASON: Exercised in the jwiegley/pi fork TUI under tmux: schedule (delay and clock), list, completions, error display, scheduled command firing with visible output, cancel via scheduled command, /reload restore, missed-after-quit hand-back with editor restore, and /clone starting with no prompts.
+:SOURCE_REPO: pi-at
+:SOURCE_REPO_PATH: /Users/johnw/src/sys/pi-at
+:ORIGINAL_SIZE: 0
+:END:
+
+Load the extension in pi under tmux; exercise schedule, list, cancel, status line, firing, and /reload restore.
+
+** Dependencies
+
+#+begin_src json
+[
+  {
+    "issue_id": "at-at-epic-fbv.6",
+    "depends_on_id": "at-at-epic-fbv",
+    "type": "parent-child",
+    "created_at": "2026-10-28T18:31:40.447622Z",
+    "created_by": "johnw",
+    "metadata": "{}",
+    "thread_id": ""
+  },
+  {
+    "issue_id": "at-at-epic-fbv.6",
+    "depends_on_id": "at-at-epic-fbv.4",
+    "type": "blocks",
+    "created_at": "2026-10-28T18:31:50.007735Z",
+    "created_by": "johnw",
+    "metadata": "{}",
+    "thread_id": ""
+  }
+]
+#+end_src
+
+* DONE [#B] Address code review of pi-at: fork revival, lost rejected prompts, abort, timer crash, parsing
+:PROPERTIES:
+:OBR_SCHEMA_VERSION: 17
+:ID:       at-at-epic-fbv.7
+:LABELS:   []
+:ISSUE_TYPE: bug
+:CREATED:  [2026-10-28 Wed 13:06]
+:MODIFIED: [2026-10-28 Wed 13:06]
+:CREATED_BY: johnw
+:FINISHED: [2026-10-28 Wed 13:06]
+:CLOSE_REASON: Records carry sessionId and foreign ones are ignored; sent prompts stay recoverable until agent_start and are handed back if Pi stays idle past the grace period; aborted settles hand due prompts back; timer wake catches errors and stops the session; delay parts continue only in smaller units on one line; hints suggest only valid input; Paused notice removed; RPC hand-backs report full text. Regression tests: real createBranchedSession fork and real preflight rejection fail on 83ece96 and pass now; 10/10 mutations caught.
+:SOURCE_REPO: pi-at
+:SOURCE_REPO_PATH: /Users/johnw/src/sys/pi-at
+:ORIGINAL_SIZE: 0
+:END:
+
+Review of 9d6227f..83ece96 found: (1) /fork and /clone restored copied snapshots, reviving cancelled prompts; (2) a prompt Pi rejected in preflight was deleted with its text lost; (3) Escape sent the next due prompt at once; (4) a timer exception could crash Pi; (5) delays absorbed the start of the prompt (2h 3d printer status); (6) error hints suggested rejected input; (7) Paused notice never visible; (8) RPC hand-back overwrote the client draft.
+
+** Dependencies
+
+#+begin_src json
+[
+  {
+    "issue_id": "at-at-epic-fbv.7",
+    "depends_on_id": "at-at-epic-fbv",
+    "type": "parent-child",
+    "created_at": "2026-10-28T20:06:01.523660Z",
+    "created_by": "johnw",
+    "metadata": "{}",
+    "thread_id": ""
+  },
+  {
+    "issue_id": "at-at-epic-fbv.7",
+    "depends_on_id": "at-at-epic-fbv.3",
+    "type": "discovered-from",
+    "created_at": "2026-10-28T20:06:01.523660Z",
+    "created_by": "johnw",
+    "metadata": "{}",
+    "thread_id": ""
+  }
+]
+#+end_src
+

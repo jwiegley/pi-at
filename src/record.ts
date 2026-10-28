@@ -3,8 +3,11 @@ export const RECORD_TYPE = "pi-at/jobs";
 
 export type AtJob = { id: number; dueAt: number; prompt: string };
 
-/** The complete pending set after a change; the latest record in the session file wins. */
-export type AtRecord = { version: 1; nextId: number; jobs: AtJob[] };
+/**
+ * The complete pending set after a change; the latest record in the session file wins. A fork
+ * or clone copies its parent's records, so each names the session that wrote it.
+ */
+export type AtRecord = { version: 1; sessionId: string; nextId: number; jobs: AtJob[] };
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -26,7 +29,8 @@ function parseJob(value: unknown, nextId: number): AtJob | undefined {
 /** Validate a stored snapshot; undefined means it cannot be restored safely. */
 export function parseAtRecord(value: unknown): AtRecord | undefined {
   if (!isObject(value) || value.version !== 1) return undefined;
-  const { nextId, jobs } = value;
+  const { sessionId, nextId, jobs } = value;
+  if (typeof sessionId !== "string" || sessionId.length === 0) return undefined;
   if (!isPositiveInteger(nextId) || !Array.isArray(jobs)) return undefined;
 
   const parsed: AtJob[] = [];
@@ -37,5 +41,5 @@ export function parseAtRecord(value: unknown): AtRecord | undefined {
     ids.add(job.id);
     parsed.push(job);
   }
-  return { version: 1, nextId, jobs: parsed };
+  return { version: 1, sessionId, nextId, jobs: parsed };
 }

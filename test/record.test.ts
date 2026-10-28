@@ -5,6 +5,7 @@ import { parseAtRecord } from "../src/record.ts";
 
 const valid = {
   version: 1,
+  sessionId: "019a2f0c-session",
   nextId: 4,
   jobs: [
     { id: 3, dueAt: Date.parse("2026-10-28T16:35:00-07:00"), prompt: "continue" },
@@ -26,6 +27,8 @@ test("rejects snapshots that cannot be restored safely", () => {
     ["null", null],
     ["array", [valid]],
     ["future version", { ...valid, version: 2 }],
+    ["missing session id", { ...valid, sessionId: undefined }],
+    ["empty session id", { ...valid, sessionId: "" }],
     ["zero next id", { ...valid, nextId: 0, jobs: [] }],
     ["fractional next id", { ...valid, nextId: 4.5 }],
     ["jobs not an array", { ...valid, jobs: {} }],
@@ -42,5 +45,6 @@ test("rejects snapshots that cannot be restored safely", () => {
 });
 
 test("accepts an empty snapshot that records cancelled or sent jobs", () => {
-  assert.deepEqual(parseAtRecord({ version: 1, nextId: 7, jobs: [] }), { version: 1, nextId: 7, jobs: [] });
+  const empty = { version: 1, sessionId: "019a2f0c-session", nextId: 7, jobs: [] };
+  assert.deepEqual(parseAtRecord(empty), empty);
 });
