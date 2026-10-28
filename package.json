@@ -1,0 +1,48 @@
+{
+  "name": "pi-at",
+  "version": "0.1.0",
+  "description": "Pi extension that sends a prompt after a delay or at a clock time: /at 4h <prompt> or /at 4:35pm <prompt>",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi-coding-agent",
+    "schedule",
+    "prompt"
+  ],
+  "files": [
+    "index.ts",
+    "src/**/*.ts",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test",
+    "pack:check": "npm pack --dry-run --json",
+    "check": "npm run typecheck && npm test && npm run pack:check"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=1.3.0 <2.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "1.3.0",
+    "@earendil-works/pi-coding-agent": "1.3.0",
+    "@types/node": "22.19.19",
+    "typescript": "5.9.3"
+  }
+}
