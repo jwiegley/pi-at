@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createPiAt, DISPATCH_GRACE_MS, MAX_WAIT_MS, STATUS_KEY } from "../index.ts";
+import { createPiAt, DISPATCH_GRACE_MS, MAX_WAIT_MS, STATUS_KEY, UPSTREAM_LOOKBACK } from "../index.ts";
 import { USAGE } from "../src/parse.ts";
 import { RECORD_TYPE } from "../src/record.ts";
 import { FakeClock } from "./support/clock.ts";
@@ -15,7 +15,12 @@ const HOUR = 60 * MINUTE;
 const START = Date.parse("2026-10-28T13:00:00-07:00");
 const SEND_OPTIONS = { deliverAs: "followUp", expandPromptTemplates: true };
 
-type Entry = { type: "custom"; id: string; customType: string; data: unknown };
+type Entry = { type: "custom"; id: string; parentId: string | null; customType: string; data: unknown };
+
+/** Append to the session file as Pi does: each new entry is a child of the current leaf. */
+function append(entries: Entry[], customType: string, data: unknown, id = `entry-${entries.length + 1}`): void {
+  entries.push({ type: "custom", id, parentId: entries.at(-1)?.id ?? null, customType, data });
+}
 type Command = {
   handler(args: string, ctx: ExtensionCommandContext): Promise<void>;
   getArgumentCompletions?(prefix: string): unknown;
@@ -57,7 +62,7 @@ function createRuntime(
         appendError = undefined;
         throw error;
       }
-      entries.push({ type: "custom", id: `entry-${entries.length + 1}`, customType, data: structuredClone(data) });
+      append(entries, customType, structuredClone(data));
     },
     getCommands() {
       return commands;
@@ -89,7 +94,23 @@ type Runtime = ReturnType<typeof createRuntime>;
 function sessionManager(entries: Entry[], history: "indexed" | "upstream", sessionId: string) {
   const getEntries = () => [...entries];
   const getSessionId = () => sessionId;
-  if (history === "upstream") return { getEntries, getSessionId };
+  if (history === "upstream") {
+    // The fork's bounded-history policy forbids reading the whole history on any host.
+    const wholeHistory = () => {
+      throw new Error("pi-at must not read the whole session history");
+    };
+    let byId = new Map<string, Entry>();
+    return {
+      getSessionId,
+      getLeafEntry() {
+        byId = new Map(entries.map((entry) => [entry.id, entry]));
+        return entries.at(-1);
+      },
+      getEntry: (id: string) => byId.get(id),
+      getEntries: wholeHistory,
+      getBranch: wholeHistory,
+    };
+  }
   return {
     getSessionId,
     getEntries() {
@@ -444,12 +465,12 @@ test("reports prompts that fell due while the session was closed and restores th
   assert.equal(later.ui.editorText, "");
 });
 
-test("restores from the full history on upstream Pi, which lacks indexed lookups", async () => {
+test("restores on upstream Pi by walking back along the active branch", async () => {
   const { clock, entries, runtime, ui } = await start();
   await runtime.run("1h first", ui);
   await runtime.run("2h second", ui);
   await runtime.run("cancel 1", ui);
-  entries.push({ type: "custom", id: "other", customType: "another-extension", data: {} });
+  append(entries, "another-extension", {});
   await runtime.emit("session_shutdown", { reason: "reload" }, ui);
 
   const reloaded = createRuntime(clock, entries);
@@ -458,6 +479,23 @@ test("restores from the full history on upstream Pi, which lacks indexed lookups
   assert.deepEqual(reloadedUi.messages, ["Restored 1 scheduled prompt; next at 3:00pm"]);
   clock.advance(2 * HOUR);
   assert.deepEqual(reloaded.sends.map(({ content }) => content), ["second"]);
+});
+
+test("looks back only a bounded distance along the branch on upstream Pi", async () => {
+  for (const [later, restored] of [
+    [UPSTREAM_LOOKBACK - 1, true],
+    [UPSTREAM_LOOKBACK, false],
+  ] as const) {
+    const { clock, entries, runtime, ui } = await start();
+    await runtime.run("1h ping", ui);
+    await runtime.emit("session_shutdown", { reason: "reload" }, ui);
+    for (let count = 0; count < later; count++) append(entries, "another-extension", {});
+
+    const reloaded = createRuntime(clock, entries);
+    const reloadedUi = createUi(entries, { history: "upstream" });
+    await reloaded.emit("session_start", { reason: "reload" }, reloadedUi);
+    assert.equal(reloadedUi.status, restored ? "◷ at 2:00pm" : undefined, `${later} later entries`);
+  }
 });
 
 test("leaves prompts in their session when switching to another", async () => {
@@ -560,7 +598,7 @@ test("reports the full text instead of replacing the draft over RPC, which canno
 
 test("ignores an unreadable record and starts fresh", async () => {
   const clock = new FakeClock(START);
-  const entries: Entry[] = [{ type: "custom", id: "bad", customType: RECORD_TYPE, data: { version: 99 } }];
+  const entries: Entry[] = [{ type: "custom", id: "bad", parentId: null, customType: RECORD_TYPE, data: { version: 99 } }];
   const runtime = createRuntime(clock, entries);
   const ui = createUi(entries);
   await runtime.emit("session_start", { reason: "resume" }, ui);

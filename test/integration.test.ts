@@ -121,11 +121,11 @@ test("a scheduled prompt reaches the model when it falls due", async () => {
   }
 });
 
-test("scheduled prompts survive a real /reload on upstream Pi's session history", async () => {
+test("scheduled prompts survive a real /reload on upstream Pi's active branch", async () => {
   const { clock, host, ui } = await startHost();
   const asked = recordPrompts(host, 1);
   try {
-    // Upstream Pi lacks the fork's indexed lookup, so this exercises the full-history scan.
+    // Upstream Pi lacks the fork's indexed lookup, so this exercises the bounded branch walk.
     assert.equal("getLatestCustomEntry" in host.sessionManager, false);
     await host.session.prompt("/at 1h after the reload");
     await host.session.prompt("/at 2h cancelled before the reload");

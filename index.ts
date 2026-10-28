@@ -11,6 +11,8 @@ export const MAX_WAIT_MS = 30_000;
 export const DISPATCH_GRACE_MS = 5_000;
 /** How often a due or starting prompt re-checks Pi's state. */
 const BUSY_RETRY_MS = 1_000;
+/** How many entries back along the active branch to look for a record on hosts without indexed lookups. */
+export const UPSTREAM_LOOKBACK = 10_000;
 
 export type AtClock = {
   now(): number;
@@ -67,10 +69,12 @@ function latestRecordEntry(sessionManager: SessionHistory): SessionEntry | undef
   if (sessionManager.getLatestCustomEntry !== undefined) {
     return sessionManager.getLatestCustomEntry(RECORD_TYPE, { scope: "all" });
   }
-  const entries = sessionManager.getEntries();
-  for (let index = entries.length - 1; index >= 0; index--) {
-    const entry = entries[index]!;
+  // Upstream Pi has no indexed lookup, and reading its whole history is exactly what the fork's
+  // bounded APIs exist to avoid, so walk back a bounded distance along the active branch instead.
+  let entry = sessionManager.getLeafEntry();
+  for (let inspected = 0; entry !== undefined && inspected < UPSTREAM_LOOKBACK; inspected++) {
     if (entry.type === "custom" && entry.customType === RECORD_TYPE) return entry;
+    entry = entry.parentId === null ? undefined : sessionManager.getEntry(entry.parentId);
   }
   return undefined;
 }

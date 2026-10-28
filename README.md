@@ -76,7 +76,7 @@ In RPC mode the client's editor cannot be read, so instead of replacing a draft 
 
 ## Persistence
 
-Every change to the pending prompts appends a snapshot to the session as a `pi-at/jobs` custom entry, which is never sent to the model. Prompts belong to the session rather than to a branch, so `/tree` navigation does not affect them.
+Every change to the pending prompts appends a snapshot to the session as a `pi-at/jobs` custom entry, which is never sent to the model. Prompts belong to the session rather than to a branch, so `/tree` navigation does not affect them (on upstream Pi, see [Compatibility](#compatibility)).
 
 - **`/reload`** restores pending prompts. A prompt that fell due during the reload is sent once Pi is idle.
 - **Quit, then resume** (`pi -c`, `/resume`) restores prompts that are still in the future. A prompt that fell due while the session was closed is not sent, since sending it unannounced could surprise; it is handed back instead.
@@ -93,7 +93,7 @@ Every change to the pending prompts appends a snapshot to the session as a `pi-a
 
 ## Compatibility
 
-`pi-at` ships erasable TypeScript with no build step and no runtime dependencies; Pi supplies the `@earendil-works/pi-coding-agent` host peer. It restores prompts through the fork's indexed `getLatestCustomEntry` lookup when the host provides one, and otherwise scans the session history.
+`pi-at` ships erasable TypeScript with no build step and no runtime dependencies; Pi supplies the `@earendil-works/pi-coding-agent` host peer. It restores prompts through the fork's indexed `getLatestCustomEntry` lookup when the host provides one. Upstream Pi has no such lookup, so there `pi-at` walks back along the active branch, at most ten thousand entries, rather than reading the whole history; after `/tree` navigation it restores what that branch last recorded.
 
 ## Development
 
