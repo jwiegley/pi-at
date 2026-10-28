@@ -48,8 +48,16 @@ test("adds compound, fractional, and space-separated delay parts", () => {
     ["1.5h ping", 90 * MINUTE, "ping"],
     ["1.25s ping", 1_250, "ping"],
     ["0m30s ping", 30 * SECOND, "ping"],
+    ["1h 30m 15s ping", HOUR + 30 * MINUTE + 15 * SECOND, "ping"],
+    ["1h30m 15s ping", HOUR + 30 * MINUTE + 15 * SECOND, "ping"],
     ["2h 5 tests are failing", 2 * HOUR, "5 tests are failing"],
-    ["2h 3d-printer status", 2 * HOUR, "3d-printer status"],
+    // A following part continues the delay only in a strictly smaller unit on the same line.
+    ["2h 3d printer status", 2 * HOUR, "3d printer status"],
+    ["30m 2 days ago the build broke, investigate", 30 * MINUTE, "2 days ago the build broke, investigate"],
+    ["30m 1h later", 30 * MINUTE, "1h later"],
+    ["1h30m 2h later", 90 * MINUTE, "2h later"],
+    ["1h 1h twice", HOUR, "1h twice"],
+    ["1h\n30m of logs to read", HOUR, "30m of logs to read"],
   ];
   for (const [args, ms, prompt] of cases) {
     assert.deepEqual(parseAtRequest(args), { when: { kind: "delay", ms }, prompt }, args);
@@ -118,9 +126,31 @@ test("rejects missing, ambiguous, and malformed times with a specific reason", (
     ["4x go", /^Unrecognized time "4x"/],
     ["-4h go", /^Unrecognized time "-4h"/],
     ["1h30 go", /^Unrecognized time "1h30"/],
+    // A unit or meridiem on the next line belongs to the prompt.
+    ["4\nhours of logs", /^"4" needs a unit or am\/pm/],
+    ["4:35\npm go", /^Ambiguous time "4:35"/],
   ];
   for (const [args, message] of cases) {
     assert.throws(() => parseAtRequest(args), { name: "AtInputError", message }, JSON.stringify(args));
+  }
+});
+
+test("suggests only forms that would be accepted", () => {
+  const cases: Array<[string, string]> = [
+    ["5 go", '"5" needs a unit or am/pm: for example 5m, 5h, or 5pm'],
+    ["16 go", '"16" needs a unit or minutes: for example 16m, 16h, or 16:00'],
+    ["0 go", '"0" needs minutes: for example 0:00'],
+    ["1.5 go", '"1.5" needs a unit: for example 1.5m or 1.5h'],
+    ["4:35 go", 'Ambiguous time "4:35": write 4:35am or 4:35pm, or a 24-hour time such as 04:35 or 16:35'],
+    ["4:35:30 go", 'Ambiguous time "4:35:30": write 4:35:30am or 4:35:30pm, or a 24-hour time such as 04:35:30 or 16:35:30'],
+    ["10:30 go", 'Ambiguous time "10:30": write 10:30am or 10:30pm, or the 24-hour time 22:30'],
+  ];
+  for (const [args, message] of cases) {
+    assert.throws(() => parseAtRequest(args), { name: "AtInputError", message }, args);
+    for (const suggestion of message.match(/\b\d[\w:.]*/g)!.slice(1)) {
+      if (suggestion === "24") continue;
+      assert.doesNotThrow(() => parseAtRequest(`${suggestion} go`), `${args}: suggested ${suggestion}`);
+    }
   }
 });
 

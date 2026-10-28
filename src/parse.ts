@@ -48,6 +48,7 @@ const NAMED_TIMES = new Map([
 ]);
 
 type Token = { value: string; start: number; end: number };
+type DelayPart = { ms: number; unit: number };
 
 function tokenAt(text: string, from: number): Token | undefined {
   const pattern = /\S+/g;
@@ -56,14 +57,65 @@ function tokenAt(text: string, from: number): Token | undefined {
   return match === null ? undefined : { value: match[0], start: match.index, end: match.index + match[0].length };
 }
 
+/** The token after `from`, unless a line break comes first: later lines belong to the prompt. */
+function nextOnLine(text: string, from: number): Token | undefined {
+  const token = tokenAt(text, from);
+  return token === undefined || text.slice(from, token.start).includes("\n") ? undefined : token;
+}
+
 function unitMs(unit: string): number {
   return UNITS.get(unit.toLowerCase()) ?? Number.NaN;
 }
 
-function delayTokenMs(token: string): number {
-  let total = 0;
-  for (const [, amount, unit] of token.matchAll(DELAY_PART)) total += Number(amount) * unitMs(unit!);
-  return total;
+function delayPart(amount: string, unit: string): DelayPart {
+  return { ms: Number(amount) * unitMs(unit), unit: unitMs(unit) };
+}
+
+function delayParts(token: string): DelayPart[] {
+  return [...token.matchAll(DELAY_PART)].map(([, amount, unit]) => delayPart(amount!, unit!));
+}
+
+/**
+ * Extend a delay with further parts in strictly smaller units on the same line, as in "1h 30m"
+ * or "1 hour 30 minutes"; anything else starts the prompt, as in "2h 3d printer status".
+ */
+function readDelay(text: string, parts: DelayPart[], last: Token): { when: When; last: Token } {
+  let smallest = Math.min(...parts.map(({ unit }) => unit));
+  let total = parts.reduce((sum, { ms }) => sum + ms, 0);
+  for (;;) {
+    const next = nextOnLine(text, last.end);
+    if (next === undefined) break;
+    let more: DelayPart[];
+    let end = next;
+    if (DELAY_TOKEN.test(next.value)) {
+      more = delayParts(next.value);
+    } else {
+      const unit = NUMBER_TOKEN.test(next.value) ? nextOnLine(text, next.end) : undefined;
+      if (unit === undefined || !UNIT_TOKEN.test(unit.value)) break;
+      more = [delayPart(next.value, unit.value)];
+      end = unit;
+    }
+    if (Math.max(...more.map(({ unit }) => unit)) >= smallest) break;
+    smallest = Math.min(...more.map(({ unit }) => unit));
+    total += more.reduce((sum, { ms }) => sum + ms, 0);
+    last = end;
+  }
+  const ms = Math.round(total);
+  if (!(ms > 0)) throw new AtInputError("Delay must be greater than zero");
+  return { when: { kind: "delay", ms }, last };
+}
+
+/** Explain a number given without a unit, suggesting only forms that parse. */
+function bareNumberError(text: string): AtInputError {
+  const value = Number(text);
+  if (Number.isInteger(value) && value >= 1 && value <= 12) {
+    return new AtInputError(`"${text}" needs a unit or am/pm: for example ${text}m, ${text}h, or ${text}pm`);
+  }
+  if (Number.isInteger(value) && value >= 13 && value <= 23) {
+    return new AtInputError(`"${text}" needs a unit or minutes: for example ${text}m, ${text}h, or ${text}:00`);
+  }
+  if (value === 0) return new AtInputError(`"${text}" needs minutes: for example ${text}:00`);
+  return new AtInputError(`"${text}" needs a unit: for example ${text}m or ${text}h`);
 }
 
 function clockTime(spec: string, hourText: string, minuteText = "00", secondText = "00", meridiem?: string): When {
@@ -72,13 +124,13 @@ function clockTime(spec: string, hourText: string, minuteText = "00", secondText
   const second = Number(secondText);
   if (meridiem === undefined) {
     if (hour > 23 || minute > 59 || second > 59) throw new AtInputError(`Invalid time "${spec}"`);
-    // 1:00-11:59 reads differently on 12- and 24-hour clocks; a leading zero marks a 24-hour time.
+    // 1:00-11:59 reads differently on 12- and 24-hour clocks; a leading zero marks a 24-hour
+    // morning time, which 10 and 11 cannot have, so those need am or pm.
     if (hour >= 1 && hour <= 11 && !hourText.startsWith("0")) {
       const rest = spec.slice(hourText.length);
-      throw new AtInputError(
-        `Ambiguous time "${spec}": write ${spec}am, ${spec}pm, or a 24-hour time such as ` +
-          `${String(hour).padStart(2, "0")}${rest} or ${hour + 12}${rest}`,
-      );
+      const twentyFour =
+        hour <= 9 ? `a 24-hour time such as 0${hour}${rest} or ${hour + 12}${rest}` : `the 24-hour time ${hour + 12}${rest}`;
+      throw new AtInputError(`Ambiguous time "${spec}": write ${spec}am or ${spec}pm, or ${twentyFour}`);
     }
     return { kind: "clock", hour, minute, second };
   }
@@ -90,8 +142,8 @@ function clockTime(spec: string, hourText: string, minuteText = "00", secondText
 /**
  * Split `/at` arguments into a time and the prompt. The time is a delay made of one or more
  * `<number><unit>` parts (`4h`, `1h30m`, `1h 30m`, `90 minutes`) or a clock time (`4:35pm`,
- * `4:35 pm`, `16:35`, `noon`). Everything after it is the prompt, kept verbatim apart from the
- * surrounding whitespace.
+ * `4:35 pm`, `16:35`, `noon`), all on the first line. Everything after it is the prompt, kept
+ * verbatim apart from the surrounding whitespace.
  */
 export function parseAtRequest(args: string): AtRequest {
   const first = tokenAt(args, 0);
@@ -99,21 +151,18 @@ export function parseAtRequest(args: string): AtRequest {
 
   let when: When;
   let last = first;
-  const second = tokenAt(args, first.end);
+  const second = nextOnLine(args, first.end);
   if (NUMBER_TOKEN.test(first.value)) {
     if (second !== undefined && UNIT_TOKEN.test(second.value)) {
-      when = { kind: "delay", ms: Number(first.value) * unitMs(second.value) };
-      last = second;
+      ({ when, last } = readDelay(args, [delayPart(first.value, second.value)], second));
     } else if (second !== undefined && MERIDIEM_TOKEN.test(second.value) && /^\d{1,2}$/.test(first.value)) {
       when = clockTime(`${first.value} ${second.value}`, first.value, undefined, undefined, second.value);
       last = second;
     } else {
-      throw new AtInputError(
-        `"${first.value}" needs a unit or am/pm: for example ${first.value}m, ${first.value}h, or ${first.value}pm`,
-      );
+      throw bareNumberError(first.value);
     }
   } else if (DELAY_TOKEN.test(first.value)) {
-    when = { kind: "delay", ms: delayTokenMs(first.value) };
+    ({ when, last } = readDelay(args, delayParts(first.value), first));
   } else {
     const clock = CLOCK_TOKEN.exec(first.value);
     const named = NAMED_TIMES.get(first.value.toLowerCase());
@@ -128,25 +177,6 @@ export function parseAtRequest(args: string): AtRequest {
     } else {
       throw new AtInputError(`Unrecognized time "${first.value}"\n${USAGE}`);
     }
-  }
-
-  if (when.kind === "delay") {
-    // Further delay parts extend the delay: "1h 30m", "1 hour 30 minutes".
-    for (;;) {
-      const next = tokenAt(args, last.end);
-      if (next === undefined) break;
-      if (DELAY_TOKEN.test(next.value)) {
-        when = { kind: "delay", ms: when.ms + delayTokenMs(next.value) };
-        last = next;
-        continue;
-      }
-      const unit = NUMBER_TOKEN.test(next.value) ? tokenAt(args, next.end) : undefined;
-      if (unit === undefined || !UNIT_TOKEN.test(unit.value)) break;
-      when = { kind: "delay", ms: when.ms + Number(next.value) * unitMs(unit.value) };
-      last = unit;
-    }
-    when = { kind: "delay", ms: Math.round(when.ms) };
-    if (!(when.ms > 0)) throw new AtInputError("Delay must be greater than zero");
   }
 
   const prompt = args.slice(last.end).trim();
